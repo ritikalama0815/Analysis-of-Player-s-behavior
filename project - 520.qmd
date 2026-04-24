@@ -1,0 +1,403 @@
+---
+title: "520- Project"
+author: "Ritika Lama"
+format: pdf
+editor: visual
+---
+
+## Dataset
+
+```{r}
+library(tidyverse)
+gaming <- read_csv("gaming_data.csv")
+names(gaming)
+```
+
+## Clean the dataset and summarise
+
+```{r}
+gaming_clean <- gaming %>%
+  mutate(
+    LastPurchaseDate = suppressWarnings(ymd(LastPurchaseDate)),
+    InAppPurchaseAmount = if_else(is.na(InAppPurchaseAmount), 0, InAppPurchaseAmount),
+    PaymentMethod = if_else(is.na(PaymentMethod) & InAppPurchaseAmount == 0, "No Purchase", PaymentMethod),
+    Age = if_else(is.na(Age), median(Age, na.rm = TRUE), Age),
+    Gender = replace_na(Gender, "Unknown"),
+    Country = replace_na(Country, "Unknown"),
+    Device = replace_na(Device, "Unknown"),
+    GameGenre = replace_na(GameGenre, "Unknown")
+  )
+
+max_purchase_date <- max(gaming_clean$LastPurchaseDate, na.rm = TRUE)
+
+gaming_clean <- gaming_clean %>%
+  mutate(
+    RecencyDays = as.numeric(max_purchase_date - LastPurchaseDate),
+    TotalPlaytime = SessionCount * AverageSessionLength,
+    LogSpend = log1p(InAppPurchaseAmount),
+    IsPayer = if_else(InAppPurchaseAmount > 0, 1, 0)
+  )
+
+write.csv(gaming_clean, "gaming_clean.csv")
+
+head(gaming_clean)
+str(gaming_clean)
+names(gaming_clean)
+colSums(is.na(gaming_clean))
+summary(gaming_clean)
+```
+
+```{r}
+# -----------------------------
+# Graph 1: Distribution of Spending
+# -----------------------------
+ggplot(gaming_clean, aes(x = InAppPurchaseAmount)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of In-App Purchase Spending",
+    x = "In-App Purchase Amount ($)",
+    y = "Number of Players"
+  ) +
+  theme_minimal()
+
+# -----------------------------
+# Graph 2: Session Count vs Spending
+# -----------------------------
+ggplot(gaming_clean, aes(x = SessionCount, y = InAppPurchaseAmount)) +
+  geom_point(alpha = 0.4, color = "darkgreen") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(
+    title = "Session Count vs In-App Spending",
+    x = "Session Count",
+    y = "In-App Purchase Amount ($)"
+  ) +
+  theme_minimal()
+
+# -----------------------------
+# Graph 3: Average Session Length vs Spending
+# -----------------------------
+ggplot(gaming_clean, aes(x = AverageSessionLength, y = InAppPurchaseAmount)) +
+  geom_point(alpha = 0.4, color = "purple") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(
+    title = "Average Session Length vs Spending",
+    x = "Average Session Length (minutes)",
+    y = "In-App Purchase Amount ($)"
+  ) +
+  theme_minimal()
+
+# -----------------------------
+# Graph 4: Average Spending by Game Genre
+# -----------------------------
+gaming_clean %>%
+  group_by(GameGenre) %>%
+  summarise(AverageSpending = mean(InAppPurchaseAmount, na.rm = TRUE)) %>%
+  arrange(desc(AverageSpending)) %>%
+  ggplot(aes(x = reorder(GameGenre, AverageSpending), y = AverageSpending)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  labs(
+    title = "Average Spending by Game Genre",
+    x = "Game Genre",
+    y = "Average Spending ($)"
+  ) +
+  theme_minimal()
+
+# -----------------------------
+# Graph 5: Boxplot of Spending by Genre
+# -----------------------------
+ggplot(gaming_clean, aes(x = GameGenre, y = InAppPurchaseAmount)) +
+  geom_boxplot(fill = "lightgreen") +
+  coord_flip() +
+  labs(
+    title = "Spending Distribution by Game Genre",
+    x = "Game Genre",
+    y = "In-App Purchase Amount ($)"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+```{r}
+# ---------------------------
+# Modeling dataset
+# ---------------------------
+model_df <- gaming_clean %>%
+  select(
+    LogSpend, InAppPurchaseAmount, Age, Gender, Country, Device, GameGenre,
+    SessionCount, AverageSessionLength, FirstPurchaseDaysAfterInstall,
+    PaymentMethod, RecencyDays, TotalPlaytime
+  ) %>%
+  drop_na(LogSpend, Age, Gender, Country, Device, GameGenre,
+          SessionCount, AverageSessionLength, PaymentMethod, RecencyDays, TotalPlaytime)
+
+#Split training and testing
+set.seed(42)
+train_index <- sample(seq_len(nrow(model_df)), size = 0.8 * nrow(model_df))
+train <- model_df[train_index, ]
+test <- model_df[-train_index, ]
+```
+
+## K-means Player Segmentation (Minnow, Dolphin, Whale)
+
+```{r}
+set.seed(42)
+# Use payer + engagement features for clustering
+cluster_df <- gaming_clean %>%
+  select(UserID, InAppPurchaseAmount, SessionCount, AverageSessionLength, TotalPlaytime) %>%
+  drop_na() %>%
+  filter(InAppPurchaseAmount > 0)
+
+cluster_scaled <- cluster_df %>%
+  select(InAppPurchaseAmount, SessionCount, AverageSessionLength, TotalPlaytime) %>%
+  scale()
+
+kmeans_model <- kmeans(cluster_scaled, centers = 3, nstart = 30)
+
+cluster_results <- cluster_df %>%
+  mutate(cluster = kmeans_model$cluster) %>%
+  group_by(cluster) %>%
+  mutate(cluster_avg_spend = mean(InAppPurchaseAmount, na.rm = TRUE)) %>%
+  ungroup()
+
+# Rank clusters by average spending and label as Minnow/Dolphin/Whale
+cluster_rank <- cluster_results %>%
+  distinct(cluster, cluster_avg_spend) %>%
+  arrange(cluster_avg_spend) %>%
+  mutate(PlayerType = c("Minnow", "Dolphin", "Whale"))
+
+cluster_results <- cluster_results %>%
+  left_join(cluster_rank, by = c("cluster", "cluster_avg_spend"))
+
+cluster_rank
+
+cluster_results %>%
+  group_by(PlayerType) %>%
+  summarise(
+    Players = n(),
+    AvgSpend = mean(InAppPurchaseAmount, na.rm = TRUE),
+    AvgSessionCount = mean(SessionCount, na.rm = TRUE),
+    AvgSessionLength = mean(AverageSessionLength, na.rm = TRUE),
+    AvgTotalPlaytime = mean(TotalPlaytime, na.rm = TRUE)
+  ) %>%
+  arrange(match(PlayerType, c("Minnow", "Dolphin", "Whale")))
+```
+
+
+```{r}
+# 2D cluster map using PCA (similar to classic K-means cluster visualization)
+pca_fit <- prcomp(cluster_scaled)
+
+cluster_plot_df <- as_tibble(pca_fit$x[, 1:2]) %>%
+  setNames(c("PC1", "PC2")) %>%
+  mutate(PlayerType = cluster_results$PlayerType)
+
+cluster_centers <- cluster_plot_df %>%
+  group_by(PlayerType) %>%
+  summarise(PC1 = mean(PC1), PC2 = mean(PC2), .groups = "drop")
+
+ggplot(cluster_plot_df, aes(x = PC1, y = PC2, color = PlayerType)) +
+  geom_point(alpha = 0.75, size = 2) +
+  geom_point(
+    data = cluster_centers,
+    aes(x = PC1, y = PC2),
+    color = "black",
+    size = 5,
+    shape = 4,
+    stroke = 1.2,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "Estimated Number of Clusters: 3",
+    x = "Principal Component 1",
+    y = "Principal Component 2",
+    color = "Segment"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Cluster sizes (how many players in each segment)
+cluster_results %>%
+  count(PlayerType) %>%
+  mutate(PlayerType = factor(PlayerType, levels = c("Minnow", "Dolphin", "Whale"))) %>%
+  ggplot(aes(x = PlayerType, y = n, fill = PlayerType)) +
+  geom_col(width = 0.7, show.legend = FALSE) +
+  labs(
+    title = "Player Count by K-means Segment",
+    x = "Segment",
+    y = "Number of Players"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+# Segment spending profile
+cluster_results %>%
+  group_by(PlayerType) %>%
+  summarise(AvgSpend = mean(InAppPurchaseAmount, na.rm = TRUE)) %>%
+  mutate(PlayerType = factor(PlayerType, levels = c("Minnow", "Dolphin", "Whale"))) %>%
+  ggplot(aes(x = PlayerType, y = AvgSpend, fill = PlayerType)) +
+  geom_col(width = 0.7, show.legend = FALSE) +
+  labs(
+    title = "Average Spending by Segment",
+    x = "Segment",
+    y = "Average In-App Purchase Amount ($)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Distribution of spending within each cluster
+cluster_results %>%
+  mutate(PlayerType = factor(PlayerType, levels = c("Minnow", "Dolphin", "Whale"))) %>%
+  ggplot(aes(x = PlayerType, y = InAppPurchaseAmount, fill = PlayerType)) +
+  geom_boxplot(show.legend = FALSE, alpha = 0.8) +
+  labs(
+    title = "Spending Distribution Within Each Segment",
+    x = "Segment",
+    y = "In-App Purchase Amount ($)"
+  ) +
+  theme_minimal()
+```
+
+
+## Logistic Model: High vs Low Spender
+
+After segmentation, we model whether a player is a high spender or not using behavior-related predictors.
+
+```{r}
+# Binary target: high spender if spending >= 75th percentile
+threshold <- quantile(gaming_clean$InAppPurchaseAmount, 0.75, na.rm = TRUE)
+
+class_df <- gaming_clean %>%
+  mutate(
+    HighSpender = if_else(InAppPurchaseAmount >= threshold, 1, 0)
+  ) %>%
+  select(
+    HighSpender, Age, SessionCount, AverageSessionLength,
+    FirstPurchaseDaysAfterInstall, RecencyDays, TotalPlaytime
+  ) %>%
+  drop_na()
+
+set.seed(42)
+train_index_cls <- sample(seq_len(nrow(class_df)), size = 0.8 * nrow(class_df))
+train_cls <- class_df[train_index_cls, ]
+test_cls <- class_df[-train_index_cls, ]
+
+# Full logistic model with behavior variables
+glm_full <- glm(
+  HighSpender ~ Age + SessionCount + AverageSessionLength +
+    FirstPurchaseDaysAfterInstall + RecencyDays + TotalPlaytime,
+  data = train_cls,
+  family = binomial()
+)
+
+glm_summary <- summary(glm_full)
+glm_summary
+
+# Keep only significant variables (p < 0.05); fallback if none
+coefs <- coef(glm_summary)
+sig_terms <- rownames(coefs)[coefs[, "Pr(>|z|)"] < 0.05]
+sig_terms <- setdiff(sig_terms, "(Intercept)")
+if (length(sig_terms) == 0) {
+  sig_terms <- c("SessionCount", "TotalPlaytime")
+}
+
+glm_formula <- as.formula(
+  paste("HighSpender ~", paste(sig_terms, collapse = " + "))
+)
+
+glm_sig <- glm(glm_formula, data = train_cls, family = binomial())
+summary(glm_sig)
+```
+
+
+```{r}
+# Classification performance on test set
+glm_prob <- predict(glm_sig, newdata = test_cls, type = "response")
+glm_pred <- if_else(glm_prob >= 0.5, 1, 0)
+
+glm_cm <- table(Predicted = glm_pred, Actual = test_cls$HighSpender)
+glm_cm
+
+glm_accuracy <- mean(glm_pred == test_cls$HighSpender)
+glm_accuracy
+```
+
+
+## Random Forest Classification (High vs Low Spender)
+
+To compare with a non-linear model, we fit a random forest and inspect which variables contribute most to classification.
+
+```{r}
+library(randomForest)
+set.seed(42)
+rf_class_model <- randomForest(
+  as.factor(HighSpender) ~ Age + SessionCount + AverageSessionLength +
+    FirstPurchaseDaysAfterInstall + RecencyDays + TotalPlaytime,
+  data = train_cls,
+  ntree = 500,
+  importance = TRUE
+)
+
+rf_class_model
+importance(rf_class_model)
+varImpPlot(rf_class_model)
+```
+
+The following test results show classification accuracy and confusion matrix for random forest.
+
+```{r}
+# Random forest test performance
+rf_pred <- predict(rf_class_model, newdata = test_cls)
+rf_cm <- table(Predicted = rf_pred, Actual = as.factor(test_cls$HighSpender))
+rf_cm
+
+rf_accuracy <- mean(rf_pred == as.factor(test_cls$HighSpender))
+rf_accuracy
+```
+
+## Model Comparison (Logistic vs Random Forest)
+
+This final table places both models side by side using the same metrics (Accuracy, Precision, Recall, F1).
+
+```{r}
+# Convert predictions to factors with consistent levels
+actual_factor <- factor(test_cls$HighSpender, levels = c(0, 1))
+glm_factor <- factor(glm_pred, levels = c(0, 1))
+rf_factor <- factor(as.numeric(as.character(rf_pred)), levels = c(0, 1))
+
+# Helper function for binary classification metrics
+calc_metrics <- function(pred, actual) {
+  cm <- table(Predicted = pred, Actual = actual)
+  
+  tp <- ifelse(!is.na(cm["1", "1"]), cm["1", "1"], 0)
+  tn <- ifelse(!is.na(cm["0", "0"]), cm["0", "0"], 0)
+  fp <- ifelse(!is.na(cm["1", "0"]), cm["1", "0"], 0)
+  fn <- ifelse(!is.na(cm["0", "1"]), cm["0", "1"], 0)
+  
+  accuracy <- (tp + tn) / sum(cm)
+  precision <- ifelse((tp + fp) == 0, 0, tp / (tp + fp))
+  recall <- ifelse((tp + fn) == 0, 0, tp / (tp + fn))
+  f1 <- ifelse((precision + recall) == 0, 0, 2 * precision * recall / (precision + recall))
+  
+  tibble(
+    Accuracy = round(accuracy, 3),
+    Precision = round(precision, 3),
+    Recall = round(recall, 3),
+    F1 = round(f1, 3)
+  )
+}
+
+comparison_table <- bind_rows(
+  calc_metrics(glm_factor, actual_factor) %>% mutate(Model = "Logistic Regression"),
+  calc_metrics(rf_factor, actual_factor) %>% mutate(Model = "Random Forest")
+) %>%
+  select(Model, Accuracy, Precision, Recall, F1)
+
+comparison_table
+```
